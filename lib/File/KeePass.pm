@@ -14,14 +14,15 @@ use Digest::SHA qw(sha256);
 
 use constant DB_HEADER_SIZE   => 124;
 use constant DB_SIG_1         => 0x9AA2D903;
-use constant DB_SIG_2         => 0xB54BFB65;
+use constant DB_SIG_2_v1      => 0xB54BFB65;
+use constant DB_SIG_2_v2      => 0xB54BFB67;
 use constant DB_VER_DW        => 0x00030002;
 use constant DB_FLAG_SHA2     => 1;
 use constant DB_FLAG_RIJNDAEL => 2;
 use constant DB_FLAG_ARCFOUR  => 4;
 use constant DB_FLAG_TWOFISH  => 8;
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 my %locker;
 
 sub new {
@@ -101,13 +102,7 @@ sub parse_db {
 
     # parse and verify headers
     my $head = $self->parse_header($buffer);
-    die "Wrong sig1 ($head->{'sig1'} != ".DB_SIG_1().")\n" if $head->{'sig1'} != DB_SIG_1;
-    die "Wrong sig2 ($head->{'sig2'} != ".DB_SIG_2().")\n" if $head->{'sig2'} != DB_SIG_2;
-    die "Unsupported File version ($head->{'ver'}).\n" if $head->{'ver'} & 0xFFFFFF00 != DB_VER_DW & 0xFFFFFF00;
-    my $enc_type = ($head->{'flags'} & DB_FLAG_RIJNDAEL) ? 'rijndael'
-                 : ($head->{'flags'} & DB_FLAG_TWOFISH)  ? 'twofish'
-                 : die "Unknown encryption type\n";
-    $buffer = substr($buffer, DB_HEADER_SIZE);
+    $buffer = substr($buffer, $head->{'header_size'});
 
     # use the headers to generate our encryption key in conjunction with the password
     my $key = sha256($pass);
@@ -117,10 +112,10 @@ sub parse_db {
     $key = sha256($head->{'seed_rand'}, $key);
 
     # decrypt the buffer
-    if ($enc_type eq 'rijndael') {
+    if ($head->{'enc_type'} eq 'rijndael') {
         $buffer = $self->decrypt_rijndael_cbc($buffer, $key, $head->{'enc_iv'});
     } else {
-        die "Unimplemented enc_type $enc_type";
+        die "Unimplemented enc_type $head->{'enc_type'}";
     }
 
     croak "The file could not be decrypted either because the key is wrong or the file is damaged.\n"
@@ -143,12 +138,73 @@ sub parse_db {
 sub parse_header {
     my ($self, $buffer) = @_;
     my $size = length($buffer);
-    croak "File was smaller than db header ($size < ".DB_HEADER_SIZE().")\n" if $size < DB_HEADER_SIZE;
+    my ($sig1, $sig2) = unpack 'LL', $buffer;
 
-    my @f = qw(sig1 sig2 flags ver seed_rand enc_iv n_groups n_entries checksum seed_key seed_rot_n);
-    my $t =   'L    L    L     L   a16       a16    L        L         a32      a32      L';
-    my %h; @h{@f} = unpack $t, $buffer;
-    return \%h;
+    if ($sig1 != DB_SIG_1) {
+        croak "File signature (sig1) did not match ($sig1 != ".DB_SIG_1().")\n";
+    }
+    elsif ($sig2 eq DB_SIG_2_v1) {
+        croak "File was smaller than db header ($size < ".DB_HEADER_SIZE().")\n" if $size < DB_HEADER_SIZE;
+        my @f = qw(sig1 sig2 flags ver seed_rand enc_iv n_groups n_entries checksum seed_key seed_rot_n);
+        my $t =   'L    L    L     L   a16       a16    L        L         a32      a32      L';
+        my %h = (version => 1, header_size => DB_HEADER_SIZE);
+        @h{@f} = unpack $t, $buffer;
+        croak "Unsupported file version ($h{'ver'}).\n" if $h{'ver'} & 0xFFFFFF00 != DB_VER_DW & 0xFFFFFF00;
+
+        $h{'enc_type'} = ($h{'flags'} & DB_FLAG_RIJNDAEL) ? 'rijndael'
+                       : ($h{'flags'} & DB_FLAG_TWOFISH)  ? 'twofish'
+                       : die "Unknown encryption type\n";
+        return \%h;
+
+    }
+    elsif ($sig2 eq DB_SIG_2_v2) {
+        my %h = (sig1 => $sig1, sig2 => $sig2, version => 2, enc_type => 'rijndael');
+        my $pos = 8;
+        ($h{'ver'}) = unpack "\@$pos L", $buffer;
+        $pos += 4;
+        croak "Unsupported file version2 ($h{'ver'}).\n" if $h{'ver'} & 0xFFFF0000 > 0x00020000 & 0xFFFF0000;
+
+        while (1) {
+            my ($type, $size) = unpack "\@$pos CS", $buffer;
+            $pos += 3;
+            if (!$type) {
+                $pos += $size;
+                last;
+            }
+            my ($val) = unpack "\@$pos a$size", $buffer;
+            $pos += $size;
+            if ($type == 1) {
+                $h{'comment'} = $val;
+            } elsif ($type == 2) {
+                $h{'cipher_id'} = $val;
+            } elsif ($type == 3) {
+                $h{'compression_flags'} = $val;
+            } elsif ($type == 4) {
+                $h{'master_seed'} = $h{'seed_rand'} = unpack 'a16', $val;
+            } elsif ($type == 5) {
+                $h{'seed_key'} = unpack 'a32', $val;
+            } elsif ($type == 6) {
+                $h{'seed_rot_n'} = unpack 'L', $val;
+            } elsif ($type == 7) {
+                $h{'enc_iv'} = unpack 'a16', $val;
+            } elsif ($type == 8) {
+                $h{'protected_stream_key'} = $val;
+            } elsif ($type == 9) {
+                $h{'stream_start_bytes'} = $val;
+            } elsif ($type == 10) {
+                $h{'inner_random_stream_id'} = $val;
+            } else {
+                print "$type, $val\n";
+            }
+        }
+
+        $h{'header_size'} = $pos;
+        croak "Parsing of keepass v2 files is not yet supported.\n";
+        return \%h;
+    }
+    else {
+        die "Second file signature did not match ($sig2 != ".DB_SIG_2_v1()." or ".DB_SIG_2_v2().")\n";
+    }
 }
 
 sub parse_groups {
@@ -170,19 +226,28 @@ sub parse_groups {
         die "Group header offset is out of range. ($pos, $size)" if $pos + $size > length($buffer);
 
         if ($type == 1) {
-            $group->{'id'}     = unpack 'L', substr($buffer, $pos, 4);
+            $group->{'id'}       = unpack 'L', substr($buffer, $pos, 4);
         } elsif ($type == 2) {
-            ($group->{'title'} = substr($buffer, $pos, $size)) =~ s/\0$//;
+            ($group->{'title'}   = substr($buffer, $pos, $size)) =~ s/\0$//;
+        } elsif ($type == 3) {
+            $group->{'created'}  = $self->parse_date(substr($buffer, $pos, $size));
+        } elsif ($type == 4) {
+            $group->{'modified'} = $self->parse_date(substr($buffer, $pos, $size));
+        } elsif ($type == 5) {
+            $group->{'accessed'} = $self->parse_date(substr($buffer, $pos, $size));
+        } elsif ($type == 6) {
+            $group->{'expires'}  = $self->parse_date(substr($buffer, $pos, $size));
         } elsif ($type == 7) {
-            $group->{'icon'}   = unpack 'L', substr($buffer, $pos, 4);
+            $group->{'icon'}     = unpack 'L', substr($buffer, $pos, 4);
         } elsif ($type == 8) {
-            $group->{'level'}  = unpack 'S', substr($buffer, $pos, 2);
+            $group->{'level'}    = unpack 'S', substr($buffer, $pos, 2);
         } elsif ($type == 0xFFFF) {
+            $group->{'created'} ||= '';
             $n_groups--;
             $gmap{$group->{'id'}} = $group;
             my $level = $group->{'level'} || 0;
             if ($previous_level > $level) {
-                splice @gref, $previous_level, $previous_level - $level, ();
+                splice @gref, $level, @gref - $level, ();
                 push @gref, \@groups if !@gref;
             } elsif ($previous_level < $level) {
                 push @gref, ($gref[-1]->[-1]->{'groups'} = []);
@@ -241,6 +306,7 @@ sub parse_entries {
 	} elsif ($type == 0xE) {
             $entry->{'binary'}    = substr($buffer, $pos, $size);
         } elsif ($type == 0xFFFF) {
+            $entry->{'created'} ||= '';
             $n_entries--;
             my $gid = delete $entry->{'group_id'};
             my $ref = $gmap->{$gid};
@@ -372,6 +438,10 @@ sub gen_db {
         $head->{'n_groups'}++;
         my @d = ([1,      pack('LL', 4, $g->{'id'})],
                  [2,      pack('L', length($g->{'title'})+1)."$g->{'title'}\0"],
+                 [3,      pack('L',  5). $self->gen_date($g->{'created'}  || $self->now)],
+                 [4,      pack('L',  5). $self->gen_date($g->{'modified'} || $self->now)],
+                 [5,      pack('L',  5). $self->gen_date($g->{'accessed'} || $self->now)],
+                 [6,      pack('L',  5). $self->gen_date($g->{'expires'}  || $self->default_exp)],
                  [7,      pack('LL', 4, $g->{'icon'}  || 0)],
                  [8,      pack('LS', 2, $g->{'level'} || 0)],
                  [0xFFFF, pack('L', 0)]);
@@ -391,7 +461,7 @@ sub gen_db {
                      [9,      pack('L', 5). $self->gen_date($e->{'created'}  || $self->now)],
                      [0xA,    pack('L', 5). $self->gen_date($e->{'modified'} || $self->now)],
                      [0xB,    pack('L', 5). $self->gen_date($e->{'accessed'} || $self->now)],
-                     [0xC,    pack('L', 5). $self->gen_date($e->{'expires'}  || $self->now)],
+                     [0xC,    pack('L', 5). $self->gen_date($e->{'expires'}  || $self->default_exp)],
                      [0xD,    pack('L', length($e->{'bin_desc'})+1)."$e->{'bin_desc'}\0"],
                      [0xE,    pack('L', length($e->{'binary'})).$e->{'binary'}],
                      [0xFFFF, pack('L', 0)]);
@@ -403,7 +473,7 @@ sub gen_db {
 
     $head->{'checksum'} = sha256($buffer);
     $head->{'sig1'}  = DB_SIG_1();
-    $head->{'sig2'}  = DB_SIG_2();
+    $head->{'sig2'}  = DB_SIG_2_v1();
     $head->{'flags'} = DB_FLAG_RIJNDAEL();
     $head->{'ver'}   = DB_VER_DW();
 
@@ -434,9 +504,9 @@ sub dump_groups {
     my %gargs; for (keys %$args) { $gargs{$2} = $args->{$1} if /^(group_(.+))$/ };
     foreach my $g ($self->find_groups(\%gargs, $groups)) {
         my $indent = '    ' x $g->{'level'};
-        $t .= $indent.($g->{'expanded'} ? '-' : '+')."  $g->{'title'} ($g->{'id'})\n";
+        $t .= $indent.($g->{'expanded'} ? '-' : '+')."  $g->{'title'} ($g->{'id'}) $g->{'created'}\n";
         local $g->{'groups'}; # don't recurse while looking for entries since we are already flat
-        $t .= "$indent    > $_->{'title'}\t($_->{'id'})\n" for $self->find_entries($args, [$g]);
+        $t .= "$indent    > $_->{'title'}\t($_->{'id'}) $_->{'created'}\n" for $self->find_entries($args, [$g]);
     }
     return $t;
 }
@@ -455,6 +525,9 @@ sub add_group {
         $groups = $parent_group->{'groups'} ||= [] if $parent_group;
     }
     $groups ||= $top_groups || ($self->{'groups'} ||= []);
+
+    $args->{$_} = $self->now for grep {!defined $args->{$_}} qw(created accessed modified);;
+    $args->{'expires'} ||= $self->default_exp;
 
     push @$groups, $args;
     $self->find_groups({}, $groups); # sets title, level, icon and id
@@ -535,8 +608,8 @@ sub add_entry {
 
     $args->{$_} = ''         for grep {!defined $args->{$_}} qw(title url username password comment bin_desc binary);
     $args->{$_} = 0          for grep {!defined $args->{$_}} qw(id icon);
-    $args->{$_} = $self->now for grep {!defined $args->{$_}} qw(created accessed modified);;
-    $args->{'expires'} ||= '2999-12-31 23:23:59';
+    $args->{$_} = $self->now for grep {!defined $args->{$_}} qw(created accessed modified);
+    $args->{'expires'} ||= $self->default_exp;
     while (!$args->{'id'} || $args->{'id'} !~ /^[a-f0-9]{32}$/ || $self->find_entry({id => $args->{'id'}}, $groups)) {
         $args->{'id'} = unpack 'H32', sha256(time.rand().$$);
     }
@@ -587,6 +660,8 @@ sub now {
     my ($sec, $min, $hour, $day, $mon, $year) = localtime;
     return sprintf '%04d-%02d-%02d %02d:%02d:%02d', $year+1900, $mon+1, $day, $hour, $min, $sec;
 }
+
+sub default_exp { shift->{'default_exp'} || '2999-12-31 23:23:59' }
 
 ###----------------------------------------------------------------###
 
