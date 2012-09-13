@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               File-KeePass
-version:            2.01
+version:            2.02
 abstract:           Interface to KeePass V1 and V2 database files
 author:
     - Paul Seamons
@@ -13,6 +13,7 @@ build_requires:
 requires:
     Crypt::Rijndael:  1.0
     Digest::SHA:      1.0
+    MIME::Base64:     1.0
 no_index:
     directory:
         - t
