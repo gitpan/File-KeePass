@@ -2,74 +2,86 @@
 
 =head1 NAME
 
-00_base.t - Check basic functionality of File::KeePass
+01_kdbx.t - Check version 2 functionality of File::KeePass
 
 =cut
 
 use strict;
 use warnings;
-use Test::More tests => 80;
+use Test::More tests => 17;
+
+if (!eval {
+    require MIME::Base64;
+}) {
+    diag "Failed to load library: $@";
+  SKIP: { skip "Missing necessary libraries.\n", 70 };
+    exit;
+}
 
 use_ok('File::KeePass');
 
-my $dump;
 my $pass = "foo";
-my $obj  = File::KeePass->new;
-ok(!eval { $obj->groups }, "General - No groups until we do something");
-ok(!eval { $obj->header }, "General - No header until we do something");
+my $ok;
 
-###----------------------------------------------------------------###
+my $obj1_1 = File::KeePass->new;
+my $obj1_2 = File::KeePass->new;
+my $obj2_1 = File::KeePass->new;
+my $obj2_2 = File::KeePass->new;
+my $G1 = $obj1_1->add_group({ title => 'personal' });
+my $G2 = $obj1_1->add_group({ title => 'career',  group => $G1 });
+my $G3 = $obj1_1->add_group({ title => 'finance', group => $G1 });
+my $G4 = $obj1_1->add_group({ title => 'banking', group => $G2 });
+my $G5 = $obj1_1->add_group({ title => 'credit',  group => $G2 });
+my $G6 = $obj1_1->add_group({ title => 'health',  group => $G1 });
+my $G7 = $obj1_1->add_group({ title => 'web',     group => $G1 });
+my $G8 = $obj1_1->add_group({ title => 'hosting', group => $G7 });
+my $G9 = $obj1_1->add_group({ title => 'mail',    group => $G7 });
+my $G0 = $obj1_1->add_group({ title => 'Foo'      });
 
-# create some new groups
-my $g = $obj->add_group({
-    title => 'Foo',
-    icon  => 1,
-    expanded => 1,
-});
-ok($g, "Groups - Could add a group");
-my $gid = $g->{'id'};
-ok($gid, "Groups - Could add a group");
-ok($obj->groups, "Groups - Now we have groups");
-ok(!eval { $obj->header }, "Groups - Still no header until we do something");
-ok($g = $obj->find_group({id => $gid}), "Groups - Found a group");
-is($g->{'title'}, 'Foo', "Groups - Was the same group");
+$obj1_1->add_entry({title => "Hey", group => $G1});
+$obj1_1->add_entry({title => "Hey2", group => $G1});
 
-my $g2 = $obj->add_group({
-    title    => 'Bar',
-    group    => $gid,
-});
-my $gid2 = $g2->{'id'};
-ok($g2 = $obj->find_group({id => $gid2}), "Groups - Found a child group");
-is($g2->{'title'}, 'Bar', "Groups - Was the same group");
+$obj1_1->add_entry({title => "Hey3", group => $G5});
 
-###----------------------------------------------------------------###
+my $dump1 = "\n".eval { $obj1_1->dump_groups };
 
-# search tests
-my $g2_2 = $obj->find_group({'id =' => $gid2});
-is($g2_2, $g2, "Search - eq searching works");
+print "v1 -> v1\n";
+$ok = $obj1_2->parse_db($obj1_1->gen_db($pass), $pass, {auto_lock => 0});
+my $dump2 = "\n".eval { $obj1_2->dump_groups };
+is($dump1, $dump2, "Export v1/import v1 is fine");
+is(eval{$obj1_1->header->{'version'}}, undef, 'No version set on pure gen object');
+is($obj1_2->header->{'version'}, 1, 'Correct version 1 of re-import');
 
-($g2_2, my $gcontainer) = $obj->find_group({'id =' => $gid2});
-is($g2_2, $g2, "Search - find_group wantarray works");
-is($gcontainer, $g->{'groups'}, "Search - find_group wantarray works");
+print "v1 new -> v2\n";
+$ok = $obj2_1->parse_db($obj1_1->gen_db($pass, {version => 2}), $pass, {auto_lock => 0});
+my $dump3 = "\n".eval { $obj2_1->dump_groups };
+is($dump2, $dump3, "Export from v1 to v2/import v2 is fine");
+is(eval{$obj1_1->header->{'version'}}, undef, 'No version set on pure gen object');
+is($obj2_1->header->{'version'}, 2, 'Correct version 2 of re-import');
 
-$g2_2 = $obj->find_group({'id !' => $gid});
-is($g2_2, $g2, "Search - ne searching works");
+print "v1 -> v2\n";
+$ok = $obj2_1->parse_db($obj1_2->gen_db($pass, {version => 2}), $pass, {auto_lock => 0});
+my $dump4 = "\n".eval { $obj2_1->dump_groups };
+is($dump3, $dump4, "Export from v1 to v2/import v2 is fine");
+is($obj1_2->header->{'version'}, 2, 'V1 object changed to v2');
+is($obj2_1->header->{'version'}, 2, 'Correct version 2 of re-import');
 
-$g2_2 = $obj->find_group({'id !~' => qr/^\Q$gid\E$/});
-is($g2_2, $g2, "Search - Negative match searching works");
+print "# v2 -> v2\n";
+$ok = $obj2_2->parse_db($obj2_1->gen_db($pass), $pass, {auto_lock => 0});
+my $dump5 = "\n".eval { $obj2_2->dump_groups };
+is($dump4, $dump5, "Export v2/import v2 is fine");
+is($obj2_1->header->{'version'}, 2, 'Correct version 2');
+is($obj2_2->header->{'version'}, 2, 'Correct version 2 of re-import');
 
-$g2_2 = $obj->find_group({'id =~' => qr/^\Q$gid2\E$/});
-is($g2_2, $g2, "Search - Positive match searching works");
+print  "# v2 -> v1\n";
+$ok = eval { $obj1_1->parse_db($obj2_2->gen_db($pass, {version => 1}), $pass, {auto_lock => 0}) };
+ok($ok, "Gen and parse a db") or diag "Error: $@";
+my $dump6 = "\n".eval { $obj1_1->dump_groups };
+is($dump5, $dump6, "Export v2/import v1 is fine");
+is($obj2_2->header->{'version'}, 1, 'Correct version 1');
+is($obj1_1->header->{'version'}, 1, 'Correct version 1 of re-import');
 
-$g2_2 = $obj->find_group({'title lt' => 'Foo'});
-is($g2_2, $g2, "Search - Less than searching works");
-
-my $g_2 = $obj->find_group({'title gt' => 'Bar'});
-is($g_2, $g, "Search - Greater than searching works");
-
-###----------------------------------------------------------------###
-
-# try adding an entry
+__END__
 my $e  = $obj->add_entry({title => 'bam', password => 'flimflam'}); # defaults to first group
 ok($e, "Entry - Added an entry");
 my $eid = $e->{'id'};
@@ -100,7 +112,6 @@ is($e2_group, $g2, "Entry - find_entry works");
 ###----------------------------------------------------------------###
 
 # turn it into the binary encrypted blob
-ok(!eval { $obj->gen_db }, "Parsing - can't gen without a password");
 my $db = $obj->gen_db($pass);
 ok($db, "Parsing - Gened a db");
 
@@ -147,7 +158,7 @@ ok($obj->is_locked, "Locking - Object is auto locked");
 
 # test file operations
 $obj->unlock;
-my $file = __FILE__.".kdb";
+my $file = __FILE__.".kdbx";
 
 ok(!eval { $obj->save_db }, "File - Missing file");
 ok(!eval { $obj->save_db($file) }, "File - Missing pass");
@@ -175,7 +186,7 @@ unlink("$file.bak");
 ###----------------------------------------------------------------###
 
 $dump = eval { $obj->dump_groups };
-#diag($dump);
+diag($dump);
 ok($dump, "General - Ran dump groups");
 
 ###----------------------------------------------------------------###
@@ -191,13 +202,13 @@ $obj->delete_group({title => 'Bar'});
 ok(!$obj->find_group({title => 'Bar'}), 'Delete - delete_group worked');
 
 $dump = eval { $obj->dump_groups };
-#diag($dump);
+diag($dump);
 
 ###----------------------------------------------------------------###
 
 # test for correct stack unwinding during the parse_group phase
 my ($G, $G2, $G3);
-my $obj2 = File::KeePass->new;
+my $obj2 = File::KeePass->new({version => 2});
 $G = $obj2->add_group({ title => 'hello' });
 $G = $obj2->add_group({ title => 'world',    group => $G });
 $G = $obj2->add_group({ title => 'i am sam', group => $G });
@@ -206,13 +217,13 @@ $dump = "\n".eval { $obj2->dump_groups };
 $ok = $obj2->parse_db($obj2->gen_db($pass), $pass);
 my $dump2 = "\n".eval { $obj2->dump_groups };
 #diag($dump);
-is($dump2, $dump, "Dumps should match after gen_db->parse_db");# && diag($dump);
+is($dump2, $dump, "Dumps should match after gen_db->parse_db") && diag($dump);
 #exit;
 
 ###----------------------------------------------------------------###
 
 # test for correct stack unwinding during the parse_group phase
-$obj2 = File::KeePass->new;
+$obj2 = File::KeePass->new({version => 2});
 $G  = $obj2->add_group({ title => 'personal' });
 $G2 = $obj2->add_group({ title => 'career',  group => $G  });
 $G2 = $obj2->add_group({ title => 'finance', group => $G  });
@@ -227,71 +238,4 @@ $dump = "\n".eval { $obj2->dump_groups };
 $ok = $obj2->parse_db($obj2->gen_db($pass), $pass);
 $dump2 = "\n".eval { $obj2->dump_groups };
 #diag($dump2);
-is($dump2, $dump, "Dumps should match after gen_db->parse_db");# && diag($dump);
-
-###----------------------------------------------------------------###
-
-# test for entry round tripping
-
-$obj2 = File::KeePass->new;
-my $E = {
-    accessed => "2010-06-24 15:09:19",
-    auto_type => [{
-        keys => "{USERNAME}{TAB}{PASSWORD}{ENTER}",
-        window => "Foo*",
-    }, {
-        keys => "{USERNAME}{TAB}{PASSWORD}{ENTER}",
-        window => "Bar*",
-    }, {
-        keys => "{PASSWORD}{ENTER}",
-        window => "Bing*",
-    }],
-    binary   => {foo => 'content'},
-    comment  => "Hey", # a comment for the system - auto-type info is normally here
-    created  => "2010-06-24 15:09:19", # entry creation date
-    expires  => "2999-12-31 23:23:59", # date entry expires
-    icon     => 0, # icon number for use with agents
-    modified => "2010-06-24 15:09:19", # last modified
-    title    => "Something",
-    password => 'somepass', # will be hidden if the database is locked
-    url      => "http://",
-    username => "someuser",
-    id       => "0a55ac30af68149f62c072d7cc8bd5ee", # randomly generated automatically
-};
-
-$e = $obj2->add_entry({%$E});#, [$G]);
-ok($e, "Added a complex entry");
-$e2 = $obj2->find_entry({id => $E->{'id'}});
-ok($e2, "Found the entry");
-is_deeply($e2, $E, "Entry matches");
-
-$ok = $obj2->parse_db($obj2->gen_db($pass), $pass, {auto_lock => 0});
-ok($ok, "generated and parsed a file");
-
-my $e3 = $obj2->find_entry({id => $E->{'id'}});
-ok($e3, "Found the entry");
-is_deeply($e3, $E, "Entry still matches after export & import");
-
-###----------------------------------------------------------------###
-
-$obj2 = File::KeePass->new;
-$e = $obj2->add_entry({
-    auto_type => "Bam",
-    auto_type_window => "Win",
-    comment => "Auto-Type: bang\nAuto-Type-Window: Win2",
-
-    binary => "hmmm",
-    binary_name => "name",
-});
-
-is_deeply($e->{'auto_type'}, [{
-    keys => "Bam",
-    window => "Win",
-}, {
-    keys => "bang",
-    window => "Win2",
-}], "Imported from legacy auto_type initializations");
-ok(!$e->{'auto_type_window'}, "Removed extra property");
-
-is_deeply($e->{'binary'}, {name => "hmmm"}, "Imported legacy binary initializations");
-ok(!$e->{'binary_name'}, "Removed extra property");
+is($dump2, $dump, "Dumps should match after gen_db->parse_db") && diag($dump);

@@ -1,7 +1,7 @@
 --- #YAML:1.0
 name:               File-KeePass
-version:            0.03
-abstract:           Interface to KeePass V1 database files
+version:            2.00
+abstract:           Interface to KeePass V1 and V2 database files
 author:
     - Paul Seamons
 license:            unknown
@@ -17,7 +17,7 @@ no_index:
     directory:
         - t
         - inc
-generated_by:       ExtUtils::MakeMaker version 6.55_02
+generated_by:       ExtUtils::MakeMaker version 6.57_05
 meta-spec:
     url:      http://module-build.sourceforge.net/META-spec-v1.4.html
     version:  1.4

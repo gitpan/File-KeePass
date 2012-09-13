@@ -2,19 +2,28 @@
 
 =head1 NAME
 
-00_base.t - Check basic functionality of File::KeePass
+01_kdbx.t - Check version 2 functionality of File::KeePass
 
 =cut
 
 use strict;
 use warnings;
-use Test::More tests => 80;
+use Test::More tests => 77;
+
+if (!eval {
+    require MIME::Base64;
+    require XML::Parser;
+}) {
+    diag "Failed to load library: $@";
+  SKIP: { skip "Missing necessary libraries.\n", 76 };
+    exit;
+}
 
 use_ok('File::KeePass');
 
 my $dump;
 my $pass = "foo";
-my $obj  = File::KeePass->new;
+my $obj  = File::KeePass->new({version => 2});
 ok(!eval { $obj->groups }, "General - No groups until we do something");
 ok(!eval { $obj->header }, "General - No header until we do something");
 
@@ -100,7 +109,7 @@ is($e2_group, $g2, "Entry - find_entry works");
 ###----------------------------------------------------------------###
 
 # turn it into the binary encrypted blob
-ok(!eval { $obj->gen_db }, "Parsing - can't gen without a password");
+ok(!eval { $obj->gen_db }, "Parsing - cannot gen without a password");
 my $db = $obj->gen_db($pass);
 ok($db, "Parsing - Gened a db");
 
@@ -147,7 +156,7 @@ ok($obj->is_locked, "Locking - Object is auto locked");
 
 # test file operations
 $obj->unlock;
-my $file = __FILE__.".kdb";
+my $file = __FILE__.".kdbx";
 
 ok(!eval { $obj->save_db }, "File - Missing file");
 ok(!eval { $obj->save_db($file) }, "File - Missing pass");
@@ -197,7 +206,7 @@ $dump = eval { $obj->dump_groups };
 
 # test for correct stack unwinding during the parse_group phase
 my ($G, $G2, $G3);
-my $obj2 = File::KeePass->new;
+my $obj2 = File::KeePass->new({version => 2});
 $G = $obj2->add_group({ title => 'hello' });
 $G = $obj2->add_group({ title => 'world',    group => $G });
 $G = $obj2->add_group({ title => 'i am sam', group => $G });
@@ -212,7 +221,7 @@ is($dump2, $dump, "Dumps should match after gen_db->parse_db");# && diag($dump);
 ###----------------------------------------------------------------###
 
 # test for correct stack unwinding during the parse_group phase
-$obj2 = File::KeePass->new;
+$obj2 = File::KeePass->new({version => 2});
 $G  = $obj2->add_group({ title => 'personal' });
 $G2 = $obj2->add_group({ title => 'career',  group => $G  });
 $G2 = $obj2->add_group({ title => 'finance', group => $G  });
@@ -234,7 +243,7 @@ is($dump2, $dump, "Dumps should match after gen_db->parse_db");# && diag($dump);
 # test for entry round tripping
 
 $obj2 = File::KeePass->new;
-my $E = {
+$e = {
     accessed => "2010-06-24 15:09:19",
     auto_type => [{
         keys => "{USERNAME}{TAB}{PASSWORD}{ENTER}",
@@ -246,7 +255,10 @@ my $E = {
         keys => "{PASSWORD}{ENTER}",
         window => "Bing*",
     }],
-    binary   => {foo => 'content'},
+    binary   => {
+        foo => 'content',
+        bar => 'content2',
+    },
     comment  => "Hey", # a comment for the system - auto-type info is normally here
     created  => "2010-06-24 15:09:19", # entry creation date
     expires  => "2999-12-31 23:23:59", # date entry expires
@@ -257,41 +269,38 @@ my $E = {
     url      => "http://",
     username => "someuser",
     id       => "0a55ac30af68149f62c072d7cc8bd5ee", # randomly generated automatically
+
+    auto_type_enabled => 1,
+    auto_type_munge => 1,
+    background_color => '#ff0000',
+#    custom_icon_uuid => undef, # TODO
+    expires_enabled => 1,
+    foreground_color => '#ffffff',
+#    history => undef,
+    location_changed => '2012-09-07 13:12:21',
+    override_url => "ou",
+    protected => {password => 1, username => 1, "Hey There" => 1},
+    strings => {
+        "Hey There" => "You",
+        "Whats" => "Up",
+    },
+    tags => '',
+    usage_count => 23,
 };
 
-$e = $obj2->add_entry({%$E});#, [$G]);
-ok($e, "Added a complex entry");
-$e2 = $obj2->find_entry({id => $E->{'id'}});
+my $E = $obj2->add_entry({%$e});#, [$G]);
+ok($E, "Added a complex entry");
+$e2 = $obj2->find_entry({id => $e->{'id'}});
 ok($e2, "Found the entry");
-is_deeply($e2, $E, "Entry matches");
+is_deeply($e2, $e, "Entry matches");
 
-$ok = $obj2->parse_db($obj2->gen_db($pass), $pass, {auto_lock => 0});
+$ok = $obj2->parse_db($obj2->gen_db($pass, {version => 2, keep_xml => 1, comment => "hey comment"}), $pass, {auto_lock => 0});
+#print $obj2->{'xml_out'},"\n";
 ok($ok, "generated and parsed a file");
 
-my $e3 = $obj2->find_entry({id => $E->{'id'}});
+my $e3 = $obj2->find_entry({id => $e->{'id'}});
 ok($e3, "Found the entry");
-is_deeply($e3, $E, "Entry still matches after export & import");
+is_deeply($e3, $e, "Entry still matches after export & import");
 
-###----------------------------------------------------------------###
+is($obj2->header->{'comment'}, "hey comment", "Comment persisted as well");
 
-$obj2 = File::KeePass->new;
-$e = $obj2->add_entry({
-    auto_type => "Bam",
-    auto_type_window => "Win",
-    comment => "Auto-Type: bang\nAuto-Type-Window: Win2",
-
-    binary => "hmmm",
-    binary_name => "name",
-});
-
-is_deeply($e->{'auto_type'}, [{
-    keys => "Bam",
-    window => "Win",
-}, {
-    keys => "bang",
-    window => "Win2",
-}], "Imported from legacy auto_type initializations");
-ok(!$e->{'auto_type_window'}, "Removed extra property");
-
-is_deeply($e->{'binary'}, {name => "hmmm"}, "Imported legacy binary initializations");
-ok(!$e->{'binary_name'}, "Removed extra property");
