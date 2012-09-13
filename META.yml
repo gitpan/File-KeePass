@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               File-KeePass
-version:            2.00
+version:            2.01
 abstract:           Interface to KeePass V1 and V2 database files
 author:
     - Paul Seamons
