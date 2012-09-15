@@ -8,7 +8,7 @@
 
 use strict;
 use warnings;
-use Test::More tests => 80;
+use Test::More tests => 84;
 
 use_ok('File::KeePass');
 
@@ -193,6 +193,22 @@ ok(!$obj->find_group({title => 'Bar'}), 'Delete - delete_group worked');
 $dump = eval { $obj->dump_groups };
 #diag($dump);
 
+$obj->add_group({title => 'Bar'});
+$obj->add_group({title => 'Baz'});
+$obj->add_group({title => 'Bing'});
+
+$obj->delete_group({title => 'Bar'});
+ok(!$obj->find_group({title => 'Bar'}), 'Delete - delete_group worked');
+
+$obj->delete_group({title => 'Bing'});
+ok(!$obj->find_group({title => 'Bing'}), 'Delete - delete_group worked');
+
+$obj->delete_group({title => 'Baz'});
+ok(!$obj->find_group({title => 'Baz'}), 'Delete - delete_group worked');
+
+$dump = eval { $obj->dump_groups };
+#diag($dump);
+
 ###----------------------------------------------------------------###
 
 # test for correct stack unwinding during the parse_group phase
@@ -232,6 +248,8 @@ is($dump2, $dump, "Dumps should match after gen_db->parse_db");# && diag($dump);
 ###----------------------------------------------------------------###
 
 # test for entry round tripping
+my $_id = File::KeePass->gen_uuid();
+ok($_id, "Can generate a uuid");
 
 $obj2 = File::KeePass->new;
 my $E = {
@@ -256,7 +274,7 @@ my $E = {
     password => 'somepass', # will be hidden if the database is locked
     url      => "http://",
     username => "someuser",
-    id       => "0a55ac30af68149f62c072d7cc8bd5ee", # randomly generated automatically
+    id       => $_id,
 };
 
 $e = $obj2->add_entry({%$E});#, [$G]);
